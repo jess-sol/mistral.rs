@@ -474,8 +474,8 @@ macro_rules! normal_model_loader {
         $multi_progress:expr,
         $matformer_config:expr,
     ) => {{
-        let regexes = if $loading_isq && $loading_uqff {
-            // Dummy weights for the layers which will be overwritten...
+        let regexes = if $loading_uqff {
+            // Dummy weights for layers replaced by UQFF
             Some(std::sync::Arc::new(if $is_moqe {
                 $loader.isq_layer_regexes_moqe(&$config)?
             } else {
@@ -485,7 +485,7 @@ macro_rules! normal_model_loader {
             None
         };
         let get_device_for_tensor =
-            $loader.get_device_for_tensor(&$config, &*$mapper, $loading_isq)?;
+            $loader.get_device_for_tensor(&$config, &*$mapper, $loading_isq || $loading_uqff)?;
 
         let vb = from_mmaped_safetensors(
             $paths.get_weight_filenames().to_vec(),
@@ -563,8 +563,8 @@ macro_rules! vision_normal_model_loader {
         $multi_progress:expr,
         $matformer_config:expr,
     ) => {{
-        let regexes = if $loading_isq && $loading_uqff {
-            // Dummy weights for the layers which will be overwritten...
+        let regexes = if $loading_uqff {
+            // Dummy weights for layers replaced by UQFF
             Some(std::sync::Arc::new(if $is_moqe {
                 $loader.isq_layer_regexes_moqe(&$config)?
             } else {
@@ -574,7 +574,7 @@ macro_rules! vision_normal_model_loader {
             None
         };
         let get_device_for_tensor =
-            $loader.get_device_for_tensor(&$config, &*$mapper, $loading_isq)?;
+            $loader.get_device_for_tensor(&$config, &*$mapper, $loading_isq || $loading_uqff)?;
 
         let vb = from_mmaped_safetensors(
             $paths.get_weight_filenames().to_vec(),
@@ -650,14 +650,14 @@ macro_rules! embedding_normal_model_loader {
         $attention_mechanism:expr,
         $multi_progress:expr,
     ) => {{
-        let regexes = if $loading_isq && $loading_uqff {
-            // Dummy weights for the layers which will be overwritten...
+        let regexes = if $loading_uqff {
+            // Dummy weights for layers replaced by UQFF
             Some(std::sync::Arc::new($loader.isq_layer_regexes(&$config)?))
         } else {
             None
         };
         let get_device_for_tensor =
-            $loader.get_device_for_tensor(&$config, &*$mapper, $loading_isq)?;
+            $loader.get_device_for_tensor(&$config, &*$mapper, $loading_isq || $loading_uqff)?;
 
         let vb = from_mmaped_safetensors(
             $paths.get_weight_filenames().to_vec(),
@@ -812,8 +812,8 @@ macro_rules! lora_model_loader {
             unreachable!()
         };
 
-        let regexes = if $loading_isq && $loading_uqff {
-            // Dummy weights for the layers which will be overwritten...
+        let regexes = if $loading_uqff {
+            // Dummy weights for layers replaced by UQFF
             Some(std::sync::Arc::new(if $is_moqe {
                 $loader.isq_layer_regexes_moqe(&$config)?
             } else {
@@ -823,7 +823,7 @@ macro_rules! lora_model_loader {
             None
         };
         let get_device_for_tensor =
-            $loader.get_device_for_tensor(&$config, &*$mapper, $loading_isq)?;
+            $loader.get_device_for_tensor(&$config, &*$mapper, $loading_isq || $loading_uqff)?;
 
         let vb = from_mmaped_safetensors(
             $paths.get_weight_filenames().to_vec(),
