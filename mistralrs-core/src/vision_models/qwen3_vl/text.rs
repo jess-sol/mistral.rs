@@ -286,11 +286,10 @@ impl Attention {
         if let Some(t) = self.q_proj.quantized_act_type() {
             attn_output = attn_output.to_dtype(t)?;
         }
-        attn_output = if attention_mask.is_some() {
-            attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
-        } else {
-            attn_output.reshape((b_sz, q_len, ()))?
-        };
+        // Attention output is [b, n_heads, seq_len, head_dim], need to transpose to
+        // [b, seq_len, n_heads, head_dim] before reshaping to [b, seq_len, hidden_size]
+        attn_output = attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?;
+
         let mut res = self.o_proj.forward(&attn_output)?;
         if self.q_proj.quantized_act_type().is_some() {
             res = res.to_dtype(original_dtype)?;
