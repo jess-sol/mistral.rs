@@ -1299,6 +1299,44 @@ impl Qwen3VLRotaryEmbedding {
         })
     }
 
+    /// Apply interleaved MROPE pattern matching Python's apply_interleaved_mrope.
+    ///
+    /// Python implementation:
+    /// ```python
+    /// freqs_t = freqs[0]  # Start with temporal
+    /// for dim, offset in enumerate((1, 2), start=1):
+    ///     length = mrope_section[dim] * 3
+    ///     idx = slice(offset, length, 3)
+    ///     freqs_t[..., idx] = freqs[dim, ..., idx]  # Copy H/W values at their indices
+    /// ```
+    ///
+    /// For mrope_section = [24, 20, 20] and head_dim/2 = 64:
+    /// - Indices 0,3,6,...,57,60,61,62,63: T values (temporal)
+    /// - Indices 1,4,7,...,58: H values (height)
+    /// - Indices 2,5,8,...,59: W values (width)
+    fn apply_interleaved_mrope(&self, freqs: &Tensor) -> Result<Tensor> {
+        // freqs shape: (3, bs, seq_len, head_dim/2) where head_dim/2 = 64
+        let head_dim_half = freqs.dim(D::Minus1)?;
+
+        let mut slices = Vec::new();
+        let min_section = self.mrope_section[1]; // 20 (min of H and W sections)
+        let max_interleaved_idx = min_section * 3; // 20 * 3 = 60
+
+        for i in 0..head_dim_half {
+            // For each output index i, determine which dimension to use
+            // The key: source index = i (not i/3!)
+            let dim_idx = if i >= max_interleaved_idx {
+                // Beyond 60, all positions keep T values
+                0
+            } else {
+                // i < 60: T at 0,3,6,...; H at 1,4,7,...; W at 2,5,8,...
+                i % 3
+            };
+            slices.push(freqs.i(dim_idx)?.narrow(D::Minus1, i, 1)?);
+        }
+        Tensor::cat(&slices, D::Minus1)
+    }
+
     /// (cos, sin)
     pub fn compute_cos_sin(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor)> {
         let inv_freq_expanded =
@@ -1309,31 +1347,18 @@ impl Qwen3VLRotaryEmbedding {
         let freqs = inv_freq_expanded
             .matmul(&position_ids_expanded.to_dtype(inv_freq_expanded.dtype())?)?
             .transpose(2, 3)?;
-        let cos = freqs.cos()?;
-        let sin = freqs.sin()?;
+        // freqs shape: (3, bs, seq_len, head_dim/2)
 
-        let cos = Tensor::cat(
-            &cos.split(&self.mrope_section, D::Minus1)?
-                .into_iter()
-                .enumerate()
-                .map(|(i, m)| m.i(i % 3))
-                .collect::<Result<Vec<_>>>()?,
-            D::Minus1,
-        )?
-        .squeeze(0)?
-        .to_dtype(dtype)?
-        .contiguous()?;
-        let sin = Tensor::cat(
-            &sin.split(&self.mrope_section, D::Minus1)?
-                .into_iter()
-                .enumerate()
-                .map(|(i, m)| m.i(i % 3))
-                .collect::<Result<Vec<_>>>()?,
-            D::Minus1,
-        )?
-        .squeeze(0)?
-        .to_dtype(dtype)?
-        .contiguous()?;
+        // Apply interleaved MROPE pattern
+        let freqs_interleaved = self.apply_interleaved_mrope(&freqs)?;
+        // freqs_interleaved shape: (bs, seq_len, head_dim/2)
+
+        // Double the frequencies (cat with itself) to get full head_dim
+        let emb = Tensor::cat(&[&freqs_interleaved, &freqs_interleaved], D::Minus1)?;
+        // emb shape: (bs, seq_len, head_dim)
+
+        let cos = emb.cos()?.to_dtype(dtype)?.contiguous()?;
+        let sin = emb.sin()?.to_dtype(dtype)?.contiguous()?;
 
         Ok((cos, sin))
     }
@@ -1344,8 +1369,19 @@ impl Qwen3VLRotaryEmbedding {
         q: &mut Tensor,
         k: &mut Tensor,
     ) -> Result<()> {
-        *q = candle_nn::rotary_emb::rope(&q.contiguous()?, cos, sin)?;
-        *k = candle_nn::rotary_emb::rope(&k.contiguous()?, cos, sin)?;
+        // Python uses rotate_half (non-interleaved) which splits first/second half
+        // cos/sin now have shape (bs, seq_len, head_dim), rope expects (seq_len, head_dim/2)
+        // We need to squeeze batch dim and split head_dim
+        let cos = cos
+            .squeeze(0)?
+            .narrow(D::Minus1, 0, cos.dim(D::Minus1)? / 2)?
+            .contiguous()?;
+        let sin = sin
+            .squeeze(0)?
+            .narrow(D::Minus1, 0, sin.dim(D::Minus1)? / 2)?
+            .contiguous()?;
+        *q = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
+        *k = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
         Ok(())
     }
 }

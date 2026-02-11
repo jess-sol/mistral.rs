@@ -10,7 +10,7 @@ use super::config::TextConfig;
 use crate::{
     attention::SdpaParams,
     device_map::DeviceMapper,
-    layers::{self, Activation, F32RmsNorm, RmsNorm, RotaryEmbedding, Sdpa},
+    layers::{self, Activation, F32RmsNorm, Qwen3VLRotaryEmbedding, RmsNorm, Sdpa},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
         extract_logits,
@@ -91,7 +91,7 @@ struct Attention {
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    rotary_emb: Arc<RotaryEmbedding>,
+    rotary_emb: Arc<Qwen3VLRotaryEmbedding>,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
 }
@@ -99,7 +99,7 @@ struct Attention {
 impl Attention {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        rotary_emb: Arc<RotaryEmbedding>,
+        rotary_emb: Arc<Qwen3VLRotaryEmbedding>,
         cfg: &TextConfig,
         vb: ShardedVarBuilder,
         mapper: &dyn DeviceMapper,
@@ -190,7 +190,7 @@ impl Attention {
         &self,
         xs: &Tensor,
         attention_mask: Option<&Tensor>,
-        seqlen_offsets: &[usize],
+        cos_sin: &(Tensor, Tensor),
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
@@ -229,10 +229,10 @@ impl Attention {
             (q, k, v)
         };
 
-        q = q.apply(&self.q_norm)?;
-        k = k.apply(&self.k_norm)?;
+        let mut q = q.apply(&self.q_norm)?;
+        let mut k = k.apply(&self.k_norm)?;
 
-        (q, k) = self.rotary_emb.forward(&q, &k, seqlen_offsets)?;
+        self.rotary_emb.forward(cos_sin, &mut q, &mut k)?;
 
         let q = q.contiguous()?;
         let k = k.contiguous()?;
@@ -308,7 +308,7 @@ pub struct DecoderLayer {
 impl DecoderLayer {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        rotary_emb: Arc<RotaryEmbedding>,
+        rotary_emb: Arc<Qwen3VLRotaryEmbedding>,
         cfg: &TextConfig,
         vb: ShardedVarBuilder,
         mapper: &dyn DeviceMapper,
@@ -355,7 +355,7 @@ impl DecoderLayer {
         &self,
         xs: &Tensor,
         attention_mask: Option<&Tensor>,
-        seqlen_offsets: &[usize],
+        cos_sin: &(Tensor, Tensor),
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
@@ -365,7 +365,7 @@ impl DecoderLayer {
         let xs = self.self_attn.forward(
             &xs,
             attention_mask,
-            seqlen_offsets,
+            cos_sin,
             kv_cache,
             metadata,
             flash_params,
@@ -383,6 +383,7 @@ pub struct Qwen3VLTextModel {
     embed_tokens: Embedding,
     pub(super) norm: F32RmsNorm,
     layers: Vec<DecoderLayer>,
+    rotary_emb: Arc<Qwen3VLRotaryEmbedding>,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     lm_head: Arc<dyn QuantMethod>,
     pub(super) cache: EitherCache,
@@ -422,13 +423,11 @@ impl Qwen3VLTextModel {
                 .unwrap_or(&normal_loading_metadata.real_device);
             ropes.insert(
                 device.location(),
-                Arc::new(RotaryEmbedding::new(
+                Arc::new(Qwen3VLRotaryEmbedding::new(
                     cfg.rope_theta as f32,
                     cfg.head_dim,
-                    cfg.max_position_embeddings,
                     device,
-                    true,
-                    vb_m.dtype(),
+                    cfg.rope_scaling.mrope_section.clone(),
                 )?),
             );
         }
@@ -486,10 +485,18 @@ impl Qwen3VLTextModel {
                 None,
             ))?
         };
+        // Create a rotary embedding on the main device for computing cos/sin
+        let rotary_emb = Arc::new(Qwen3VLRotaryEmbedding::new(
+            cfg.rope_theta as f32,
+            cfg.head_dim,
+            &normal_loading_metadata.real_device,
+            cfg.rope_scaling.mrope_section.clone(),
+        )?);
         Ok(Self {
             embed_tokens,
             norm,
             layers,
+            rotary_emb,
             lm_head,
             cache: EitherCache::Normal(NormalCache::new(
                 cfg.num_hidden_layers,
@@ -523,8 +530,7 @@ impl Qwen3VLTextModel {
         &self,
         mut xs: Tensor,
         attention_mask: Option<&Tensor>,
-        seqlen_offsets: &[usize],
-        _position_ids: &Tensor,
+        position_ids: &Tensor,
         context_lens: Vec<(usize, usize)>,
         metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
@@ -533,15 +539,21 @@ impl Qwen3VLTextModel {
     ) -> Result<Tensor> {
         let cache = &mut self.cache.normal().0;
 
+        // Compute cos/sin for MROPE from position_ids
+        let cos_sin = self.rotary_emb.compute_cos_sin(position_ids, self.dtype)?;
+
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
+            // Move cos_sin to the layer's device
+            let device = xs.device();
+            let layer_cos_sin = (cos_sin.0.to_device(device)?, cos_sin.1.to_device(device)?);
             xs = layer.forward(
                 &xs,
                 attention_mask
                     .as_ref()
                     .map(|m| m.to_device(xs.device()).unwrap())
                     .as_ref(),
-                seqlen_offsets,
+                &layer_cos_sin,
                 &mut cache[i],
                 metadata
                     .as_ref()
