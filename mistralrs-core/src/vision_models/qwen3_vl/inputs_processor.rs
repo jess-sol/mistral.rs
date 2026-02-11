@@ -64,6 +64,8 @@ pub struct Qwen3VLProcessor {
 }
 
 impl Qwen3VLProcessor {
+    pub const VISION_START: &str = "<|vision_start|>";
+    pub const VISION_END: &str = "<|vision_end|>";
     pub const IMAGE_PAD: &str = "<|image_pad|>";
     pub const VIDEO_PAD: &str = "<|video_pad|>";
     pub const PLACEHOLDER: &str = "<|placeholder|>";
@@ -81,7 +83,13 @@ impl Processor for Qwen3VLProcessor {
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
-        &[Self::IMAGE_PAD, Self::VIDEO_PAD, Self::PLACEHOLDER]
+        &[
+            Self::VISION_START,
+            Self::VISION_END,
+            Self::IMAGE_PAD,
+            Self::VIDEO_PAD,
+            Self::PLACEHOLDER,
+        ]
     }
 
     fn template_action(&self) -> MessagesAction {
