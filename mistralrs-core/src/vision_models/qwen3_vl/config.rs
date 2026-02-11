@@ -45,10 +45,18 @@ pub struct VisionConfig {
     pub deepstack_visual_indexes: Vec<usize>,
 }
 
-// #[derive(Debug, Clone, serde::Deserialize)]
-// pub struct MRopeScaling {
-//     pub mrope_section: Vec<usize>,
-// }
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MRopeScaling {
+    pub mrope_section: Vec<usize>,
+}
+
+fn default_mrope_scaling() -> MRopeScaling {
+    // Default MROPE section for Qwen3-VL: [24, 20, 20] for head_dim=128
+    // 24 for temporal, 20 for height, 20 for width (sums to 64 = head_dim/2)
+    MRopeScaling {
+        mrope_section: vec![24, 20, 20],
+    }
+}
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct TextConfig {
@@ -64,11 +72,10 @@ pub struct TextConfig {
     pub rms_norm_eps: f64,
     pub rope_theta: f64,
     pub sliding_window: Option<usize>,
-    // pub rope_scaling: MRopeScaling,
+    #[serde(default = "default_mrope_scaling")]
+    pub rope_scaling: MRopeScaling,
     #[serde(default)]
     pub quantization_config: Option<QuantizedConfig>,
-    // pub vision_start_token_id: usize,
-    // pub max_window_layers: usize,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
