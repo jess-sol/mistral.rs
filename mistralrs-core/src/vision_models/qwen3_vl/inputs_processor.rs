@@ -536,11 +536,10 @@ impl Qwen3VLImageProcessor {
             };
             let image = image.apply(to_tensor_rescale, device)?;
 
+            let mean = config.image_mean.unwrap_or(Self::DEFAULT_MEAN).to_vec();
+            let std = config.image_std.unwrap_or(Self::DEFAULT_STD).to_vec();
             let transforms = TensorTransforms {
-                inner_transforms: &[&Normalize {
-                    mean: config.image_mean.unwrap_or(Self::DEFAULT_MEAN).to_vec(),
-                    std: config.image_std.unwrap_or(Self::DEFAULT_STD).to_vec(),
-                }],
+                inner_transforms: &[&Normalize { mean, std }],
             };
             let image = <Tensor as ApplyTensorTransforms>::apply(&image, transforms, device)?;
 
@@ -596,8 +595,9 @@ impl Qwen3VLImageProcessor {
 }
 
 impl ImagePreProcessor for Qwen3VLImageProcessor {
-    const DEFAULT_MEAN: [f64; 3] = [0.48145466, 0.4578275, 0.40821073];
-    const DEFAULT_STD: [f64; 3] = [0.26862954, 0.26130258, 0.27577711];
+    // Qwen3-VL uses [0.5, 0.5, 0.5] for mean/std (not CLIP values)
+    const DEFAULT_MEAN: [f64; 3] = [0.5, 0.5, 0.5];
+    const DEFAULT_STD: [f64; 3] = [0.5, 0.5, 0.5];
 
     fn preprocess(
         &self,
